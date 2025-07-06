@@ -59,6 +59,45 @@ router.post('/signup', async (req, res) => {
   }
 });
 
+// -- NEW LOGIN ENDPOINT --
+router.post('/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required.' });
+    }
+
+    // TODO: Implement the full, secure Firebase ID Token verification flow.
+    // For now, we are creating a "mock" login for backend testing.
+    // We look up the user by their email address.
+    const userRecord = await auth.getUserByEmail(email);
+
+    // In a real app, you would verify the password here.
+    // Since the Admin SDK can't directly verify passwords, the proper flow
+    // involves the client sending a Firebase ID Token, which we verify here.
+    // For our current testing purposes, we'll assume the user is legitimate if they exist.
+    
+    // If the user exists, we'll generate our custom JWT for them.
+    const token = jwt.sign(
+      { uid: userRecord.uid, email: userRecord.email },
+      process.env.JWT_SECRET,
+      { expiresIn: '1h' }
+    );
+
+    // Send the token back to the client.
+    res.status(200).json({ token });
+
+  } catch (error) {
+    // This error code means the user with that email was not found.
+    if (error.code === 'auth/user-not-found') {
+      return res.status(404).json({ error: 'Invalid credentials.' });
+    }
+    console.error('Error during login:', error);
+    res.status(500).json({ error: 'An unexpected error occurred.' });
+  }
+});
+
 
 // This line makes our router available to other files (specifically, index.js).
 module.exports = router;
