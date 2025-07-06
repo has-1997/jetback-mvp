@@ -101,6 +101,16 @@ router.post("/login", async (req, res) => {
   }
 });
 
+// --- NEW LOGOUT ENDPOINT ---
+// This endpoint doesn't need to do much on the server-side for JWTs.
+// Its main purpose is to give the client a formal endpoint to call when the user logs out.
+// The client is responsible for deleting the token.
+router.post("/logout", (req, res) => {
+  // A real implementation might add the token to a "blacklist" in a database like Redis.
+  // For our simple case, we just acknowledge the request.
+  res.status(200).json({ message: "Logout successful. Please delete your token." });
+});
+
 // -- NEW PROTECTED TEST ROUTE --
 // We add our 'verifyAuthToken' middleware here.
 // Any request to this endpoint must first pass through the middleware.
