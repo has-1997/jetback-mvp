@@ -62,6 +62,7 @@ router.post("/signup", async (req, res) => {
 });
 
 // -- NEW LOGIN ENDPOINT --
+// -- UPDATED LOGIN ENDPOINT --
 router.post("/login", async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -72,30 +73,75 @@ router.post("/login", async (req, res) => {
         .json({ error: "Email and password are required." });
     }
 
-    // TODO: Implement the full, secure Firebase ID Token verification flow.
-    // For now, we are creating a "mock" login for backend testing.
-    // We look up the user by their email address.
-    const userRecord = await auth.getUserByEmail(email);
+    // Use Firebase Auth REST API to verify credentials
+    // This is the secure way to verify email/password combinations
+    const response = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${process.env.FIREBASE_WEB_API_KEY}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          email: email,
+          password: password,
+          returnSecureToken: true,
+        }),
+      }
+    );
 
-    // In a real app, you would verify the password here.
-    // Since the Admin SDK can't directly verify passwords, the proper flow
-    // involves the client sending a Firebase ID Token, which we verify here.
-    // For our current testing purposes, we'll assume the user is legitimate if they exist.
+    
 
-    // If the user exists, we'll generate our custom JWT for them.
+    const data = await response.json();
+
+    if (!response.ok) {
+      // Handle Firebase Auth errors
+      if (data.error?.message === "INVALID_PASSWORD") {
+        return res.status(401).json({ error: "Invalid credentials." });
+      }
+      if (data.error?.message === "EMAIL_NOT_FOUND") {
+        return res.status(401).json({ error: "Invalid credentials." });
+      }
+      if (data.error?.message === "TOO_MANY_ATTEMPTS_TRY_LATER") {
+        return res.status(429).json({ error: "Too many failed attempts. Please try again later." });
+      }
+      if (data.error?.message === "USER_DISABLED") {
+        return res.status(403).json({ error: "Account has been disabled." });
+      }
+      
+      console.error("Firebase Auth error:", data.error);
+      return res.status(500).json({ error: "Authentication failed." });
+    }
+
+    // If we get here, the credentials are valid
+    const { localId: uid, email: userEmail } = data;
+
+    // Verify the user exists in our database (optional but recommended)
+    try {
+      const userDoc = await db.collection("users").doc(uid).get();
+      if (!userDoc.exists) {
+        // User exists in Firebase Auth but not in our database
+        // This shouldn't happen with our signup flow, but let's handle it
+        await db.collection("users").doc(uid).set({
+          email: userEmail,
+          createdAt: new Date().toISOString(),
+        });
+      }
+    } catch (dbError) {
+      console.error("Database error during login:", dbError);
+      // Continue with login even if database check fails
+    }
+
+    // Generate our custom JWT token
     const token = jwt.sign(
-      { uid: userRecord.uid, email: userRecord.email },
+      { uid: uid, email: userEmail },
       process.env.JWT_SECRET,
       { expiresIn: "1h" }
     );
 
-    // Send the token back to the client.
+    // Send the token back to the client
     res.status(200).json({ token });
   } catch (error) {
-    // This error code means the user with that email was not found.
-    if (error.code === "auth/user-not-found") {
-      return res.status(404).json({ error: "Invalid credentials." });
-    }
     console.error("Error during login:", error);
     res.status(500).json({ error: "An unexpected error occurred." });
   }

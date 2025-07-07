@@ -24,3 +24,49 @@ export const signUpUser = async (email, password) => {
     throw error;
   }
 };
+
+export const getFlights = async (token) => {
+  try {
+    const response = await fetch(`${API_URL}/flights`, {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+        // This is how we prove to the backend that we are authorized
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.error || "Failed to fetch flights");
+    }
+
+    return data; // This will be the array of flight objects
+  } catch (error) {
+    throw error;
+  }
+};
+
+export const getFlightById = async (token, flightId) => {
+  try {
+    // Note the URL now includes the flightId at the end
+    const response = await fetch(`${API_URL}/flights/${flightId}`, {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.error || "Failed to fetch flight details");
+    }
+
+    return data; // This will be the single flight object
+  } catch (error) {
+    throw error;
+  }
+};
