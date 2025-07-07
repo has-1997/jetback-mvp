@@ -1,64 +1,175 @@
 // functions/index.js
 
-// Import the Firebase Functions library, which gives us access to tools for creating Cloud Functions.
-const functions = require("firebase-functions");
+const functions = require("firebase-functions"); // For our v1 function
+const { defineSecret } = require("firebase-functions/params");
 const { simpleParser } = require("mailparser");
+const admin = require("firebase-admin");
+const { onSchedule } = require("firebase-functions/v2/scheduler"); // For our v2 function
+const { Duffel } = require("@duffel/api");
+const logger = require("firebase-functions/logger"); // The new v2 logger
 
-// A function to extract data using a regular expression.
-// It takes text and a regex pattern, finds the match, and returns it.
-// We add a check for a "match group" which allows more precise extraction.
+// Define the secret that our function will use.
+const duffelApiKey = defineSecret("DUFFEL_API_KEY");
+
+admin.initializeApp();
+
 const extractData = (text, regex) => {
   const match = text.match(regex);
-  // If a match is found, return the first "capturing group" (the part in parentheses),
-  // otherwise, return null.
   return match ? match[1] : null;
 };
 
-/**
- * Defines the 'ingestFlightEmail' HTTP-triggered Cloud Function.
- * This function will listen for POST requests from our email service (SendGrid).
- */
+// THIS IS OUR v1 FUNCTION - IT STILL USES functions.logger
 exports.ingestFlightEmail = functions.https.onRequest(async (req, res) => {
-  // Log a simple message to the Firebase console to show the function was triggered.
   functions.logger.info("ingestFlightEmail function was triggered!");
-
-  // When SendGrid calls this webhook, it sends the raw email in a field called 'email'.
-  // We grab that content here.
+  // ... rest of the v1 function is unchanged and correct
   const rawEmail = req.body.email;
 
-  // It's good practice to check if the email content actually exists before proceeding.
   if (!rawEmail) {
     functions.logger.error("No email content found in the request body.");
     return res.status(400).send("Bad Request: Email content is missing.");
   }
 
-  // A try...catch block is used for error handling.
   try {
     const parsedEmail = await simpleParser(rawEmail);
     const emailText = parsedEmail.text;
 
-    // Define the regex patterns to find our specific data.
-    // Looks for "Confirmation number: " followed by 6-8 alphanumeric characters.
     const pnrRegex = /Confirmation number: ([A-Z0-9]{6,8})/;
-    // Looks for "Total price: $" followed by digits, a period, and more digits.
     const priceRegex = /Total price: \$(\d+\.\d{2})/;
 
-    // Use our helper function to run the regex patterns on the email text.
     const pnr = extractData(emailText, pnrRegex);
     const price = extractData(emailText, priceRegex);
 
-    // Log the extracted data to prove our regex worked.
     functions.logger.info("Extracted PNR:", pnr);
     functions.logger.info("Extracted Price:", price);
 
-    // We'll add a check to make sure we found everything we needed.
     if (pnr && price) {
-      res.status(200).send(`Success! Found PNR: ${pnr}, Price: ${price}`);
+      const newFlight = {
+        pnr: pnr,
+        initialPrice: parseFloat(price),
+        status: "tracking",
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        userId: "DUMMY_USER_ID_123",
+        origin: "ORD",
+        destination: "LGA",
+        departureDate: "2025-12-25",
+      };
+
+      const writeResult = await admin
+        .firestore()
+        .collection("flights")
+        .add(newFlight);
+      functions.logger.info(
+        `Successfully stored flight with ID: ${writeResult.id}`
+      );
+
+      res
+        .status(200)
+        .send(`Successfully stored flight with ID: ${writeResult.id}`);
     } else {
       res.status(400).send("Could not extract all required flight details.");
     }
   } catch (error) {
-    functions.logger.error("Error parsing email:", error);
-    res.status(500).send("Error: Could not parse email.");
+    functions.logger.error("Error processing flight:", error);
+    res.status(500).send("Error: Could not process email.");
   }
 });
+
+// THIS IS OUR v2 FUNCTION - IT NOW USES THE NEW logger
+exports.runPriceChecks = onSchedule(
+  {
+    schedule: "every 6 hours",
+    secrets: [duffelApiKey],
+    memory: "256MiB",
+  },
+  async (event) => {
+    // We now use logger.info, not functions.logger.info
+    logger.info("runPriceChecks scheduler was triggered!");
+
+    const duffel = new Duffel({
+      token: duffelApiKey.value(),
+    });
+
+    const flightsRef = admin.firestore().collection("flights");
+    const query = flightsRef.where("status", "==", "tracking");
+
+    try {
+      const snapshot = await query.get();
+
+      if (snapshot.empty) {
+        logger.info('No flights with status "tracking" found.');
+        return null;
+      }
+
+      logger.info(`Found ${snapshot.size} flights to check.`);
+
+      for (const doc of snapshot.docs) {
+        const flightData = doc.data();
+        const flightId = doc.id;
+
+        logger.info(
+          `Checking price for flight ${flightId} (${flightData.origin} -> ${flightData.destination})`
+        );
+
+        try {
+          const offerRequest = await duffel.offerRequests.create({
+            slices: [
+              {
+                origin: flightData.origin,
+                destination: flightData.destination,
+                departure_date: flightData.departureDate,
+              },
+            ],
+            passengers: [{ type: "adult" }],
+            cabin_class: "economy",
+          });
+
+          if (offerRequest.data.offers && offerRequest.data.offers.length > 0) {
+            const currentPrice = parseFloat(
+              offerRequest.data.offers[0].total_amount
+            );
+            const initialPrice = flightData.initialPrice;
+
+            logger.info(
+              `Comparing prices for flight ${flightId}: Initial: ${initialPrice}, Current: ${currentPrice}`
+            );
+
+            if (currentPrice < initialPrice) {
+              logger.info(
+                `!!! Savings found for flight ${flightId}. Updating database...`
+              );
+
+              // --- FINAL DATABASE UPDATE LOGIC ---
+              const flightToUpdateRef = admin
+                .firestore()
+                .collection("flights")
+                .doc(flightId);
+
+              await flightToUpdateRef.update({
+                status: "savings_found", // Change the status!
+                newPrice: currentPrice, // Store the new lower price.
+                lastChecked: admin.firestore.FieldValue.serverTimestamp(), // Timestamp the check.
+              });
+
+              logger.info(
+                `Successfully updated flight ${flightId} to 'savings_found'.`
+              );
+              // --- END OF UPDATE LOGIC ---
+            } else {
+              logger.info(`No savings found for flight ${flightId}.`);
+            }
+          } else {
+            logger.warn(
+              `No offers returned from Duffel for flight ${flightId}.`
+            );
+          }
+        } catch (apiError) {
+          logger.error(`Duffel API error for flight ${flightId}:`, apiError);
+        }
+      }
+      return null;
+    } catch (dbError) {
+      logger.error("Error querying for active flights:", dbError);
+      return null;
+    }
+  }
+);
